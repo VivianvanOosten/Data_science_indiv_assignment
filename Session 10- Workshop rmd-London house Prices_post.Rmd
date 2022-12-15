@@ -1,0 +1,629 @@
+---
+title: 'Session 10: Data Science Capstone Project'
+author: "Dr Kanishka Bhattacharya"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+      number_sections: true
+      highlight: haddock
+      theme: spacelab
+      toc: yes
+      toc_depth: 2
+      toc_float:
+        collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<style>
+div.navy1 { background-color:#686868; border-radius: 5px; padding: 20px; border-style: groove; color: #ffffff;}
+
+</style>
+
+
+
+```{r, load_libraries, include = FALSE}
+
+if(!is.element("tidyverse", installed.packages()[,1]))
+{  install.packages("tidyverse", repos = "http://cran.us.r-project.org")}
+
+if(!is.element("Hmisc", installed.packages()[,1]))
+{  install.packages("Hmisc", repos = "http://cran.us.r-project.org")} #package for data summary using `describe`
+
+if(!is.element("ggplot2", installed.packages()[,1]))
+{  install.packages("ggplot2", repos = "http://cran.us.r-project.org")} #package for plots
+if(!is.element("ggthemes", installed.packages()[,1]))
+{  install.packages("ggthemes", repos = "http://cran.us.r-project.org")} #package to make fancier ggplots
+
+if(!is.element("janitor", installed.packages()[,1]))
+{ install.packages("janitor", repos = "http://cran.us.r-project.org")} #package to visualize results of machine learning tools
+if(!is.element("rpart.plot", installed.packages()[,1]))
+{  install.packages("rpart.plot", repos = "http://cran.us.r-project.org")} #package to visualize trees
+
+library(rpart.plot)
+library(caret)
+library(tidyverse) # the usual stuff: dplyr, readr, and other goodies
+library(lubridate)
+library(janitor) # clean_names()
+library(Hmisc)
+library(skimr)
+library(caretEnsemble)
+library(GGally)
+```
+
+# Introduction and learning objectives
+
+<div class = "navy1">
+The purpose of this exercise is to build an estimation engine to guide investment decisions in London house market. You will first build machine learning algorithms (and tune them) to estimate the house prices given variety of information about each property. Then, using your algorithm, you will choose 200 houses to invest in out of about 2000 houses on the market at the moment.
+
+
+<b>Learning objectives</b>
+ 
+<ol type="i">
+  <li>Using different data mining algorithms for prediction.</li>
+  <li>Dealing with large data sets</li>
+  <li>Tuning data mining algorithms</li>
+  <li>Interpreting data mining algorithms and deducing importance of variables</li>
+  <li>Using results of data mining algorithms to make business decisions</li>
+</ol>  
+</div>
+
+# Load data
+
+There are two sets of data, i) training data that has the actual prices ii) out of sample data that has the asking prices. Load both data sets. 
+
+Make sure you understand what information each column contains. Note that not all information provided might be useful in predicting house prices, but do not make any assumptions before you decide what information you use in your prediction algorithms.
+
+```{r read-investigate}
+#read in the data
+
+london_house_prices_2019_training<-read.csv("training_data_assignment_with_prices.csv")
+london_house_prices_2019_out_of_sample<-read.csv("test_data_assignment.csv")
+
+
+
+#fix data types in both data sets
+
+#fix dates
+london_house_prices_2019_training <- london_house_prices_2019_training %>% mutate(date=as.Date(date))
+london_house_prices_2019_out_of_sample<-london_house_prices_2019_out_of_sample %>% mutate(date=as.Date(date))
+#change characters to factors
+london_house_prices_2019_training <- london_house_prices_2019_training %>% mutate_if(is.character,as.factor)
+london_house_prices_2019_out_of_sample<-london_house_prices_2019_out_of_sample %>% mutate_if(is.character,as.factor)
+
+#take a quick look at what's in the data
+str(london_house_prices_2019_training)
+str(london_house_prices_2019_out_of_sample)
+
+skim(london_house_prices_2019_training)
+
+```
+
+
+```{r split the price data to training and testing}
+#let's do the initial split
+library(rsample)
+train_test_split <- london_house_prices_2019_training %>%
+  mutate(price = log(price)) %>%
+  initial_split(prop = 0.75) #training set contains 75% of the data
+# Create the training dataset
+train_data <- training(train_test_split)
+test_data <- testing(train_test_split)
+
+
+skim(train_data)
+```
+
+
+# Visualize data 
+
+Visualize and examine the data. What plots could be useful here? What do you learn from these visualizations?
+
+In order to assess the relationship between price and the other variables, we start off by visualising the distribution of prices in our dataset. Because the distribution is very skewed, we take a logarithm of the price to better view it. 
+
+```{r visualize}
+train_data %>%
+
+ggplot() + 
+  geom_histogram(aes(x = price)) +
+  labs(
+    title = 'The logarithm of price is relatively evenly distributed',
+    x = 'Price (log scale)'
+  ) +
+  theme_bw() 
+
+
+```
+
+Secondly, we plot a ggpairs for some variables of interest, including the logarithm of price. 
+
+```{r}
+
+train_data %>%
+  # removing all categorical data
+  # mostly related to geography and location
+  select(c( price, total_floor_area, distance_to_station, water_company, property_type, 
+            co2_emissions_current, london_zone, 
+            num_tube_lines, average_income)) %>%
+ggpairs(progress = FALSE)
+```
+
+Next, we investigate a possible interaction term between London zone and property type. For different areas of London the demand and supply of different property types can be differ, resulting in varying prices. 
+However, we see that the relationship is the same downward sloping relationship with a lower price for higher zones, regardless of property type. We do see that there is a higher price for detached and semi-detached houses compared to flats, but this relationship can be captured by including each variable separately into our formula. There does not appear to be a need for an interaction variable between the two. 
+
+```{r}
+ggplot(train_data, aes(x = as.factor(london_zone), y = log(price))) +
+  geom_boxplot() +
+  facet_wrap(vars(property_type)) +
+  theme(legend.position = 'none') + 
+  labs(
+    title = 'Property type and London Zone do not interact',
+    x = 'London Zone',
+    y = 'Price (log scale)'
+  ) +
+  theme_bw()
+```
+
+Lastly, we plot one of our most important predictos: floor area.
+
+```{r}
+train_data %>%
+ggplot(aes(x = log(total_floor_area), y = price)) +
+  geom_point() +
+  geom_smooth(method = 'lm')+
+  #facet_wrap(vars(district)) +
+  theme(legend.position = 'none') + 
+  labs(
+    title = 'Floor area is a great predictor for price',
+    subtitle = 'The logarithm of floor area and the logarithm of price have a linear relationship',
+    x = 'Floor area (log scale)',
+    y = 'Price (log scale)'
+  ) +
+  theme_bw()
+```
+
+
+
+Estimate a correlation table between prices and other continuous variables. 
+
+We observe a group of closely related variables, including price, total floor area, number of rooms and CO2 emissions. Given the nature of these variables, we are not surprised by the correlation. The size of the house/flat influences all of the above variables. 
+An interesting correlation is that the number of rail lines is inversely correlated with the number of tube lines. This, combined with the correlation with the London Zone, implies that living closer to the city center results in living near more tube lines but fewer rail lines. 
+A surprising correlation is between the latitude, longitude and the average income. It appears that living (LOOK UP WHERE HIGHER LAT/LONG IS) is associated with a higher average income, and quite strongly too. 
+
+```{r, correlation table, warning=FALSE, message=FALSE}
+
+# produce a correlation table using GGally::ggcor()
+# this takes a while to plot
+
+london_house_prices_2019_training %>% 
+  select(-ID) %>% #keep Y variable last
+  ggcorr(method = c("pairwise", "pearson"), layout.exp = 2,label_round=2, label = TRUE,label_size = 2,hjust = 1,nbreaks = 5,size = 2,angle = -20)
+
+```
+
+
+# Fit a linear regression model
+
+To help you get started I build a linear regression model below. I chose a subset of the features with no particular goal. You can (and should) add more variables and/or choose variable selection methods if you want.
+
+```{r}
+names(train_data)
+```
+
+```{r Comparioson LM model}
+
+#Define control variables
+control <- trainControl (
+    method="cv",
+    number=10,
+    verboseIter=FALSE) #by setting this to true the model will report its progress after each estimation
+
+# best:
+# 
+train_data2 <- train_data %>%
+  select(-c(7:13), -ID, -date, -postcode, - nearest_station, - population)
+
+#we are going to train the model and report the results using k-fold cross validation
+model0_lm<-train(
+  price ~ .,
+  data = train_data2,
+   method = "lm",
+    trControl = control
+   )
+
+# summary of the results
+summary(model0_lm)
+
+```
+
+
+
+
+```{r LR model}
+
+
+#Define control variables
+control <- trainControl (
+    method="cv",
+    number=10,
+    verboseIter=FALSE) #by setting this to true the model will report its progress after each estimation
+
+chosen_formula = price ~ log(total_floor_area) + district + distance_to_station +
+    energy_consumption_potential + property_type + london_zone +
+    average_income + windows_energy_eff + tenure
+# 
+
+#we are going to train the model and report the results using k-fold cross validation
+model1_lm<-train(
+  chosen_formula,
+  data = train_data,
+   method = "lm",
+    trControl = control
+   )
+
+# summary of the results
+summary(model1_lm)
+
+```
+
+
+```{r}
+# we can check variable importance as well
+importance <- varImp(model0_lm, scale=TRUE)
+plot(importance)
+imp_df <- importance$importance
+rownames(imp_df)[order(imp_df$Overall, decreasing=TRUE)][1:50]
+
+# price ~ total_floor_area*district + distance_to_station + number_habitable_rooms +
+#   freehold_or_leasehold + area_per_room + 
+#   + energy_consumption_potential + property_type + london_zone 
+#   + num_tube_lines + average_income + windows_energy_eff + tenure,
+
+```
+
+## Predict the values in testing and out of sample data
+
+Below I use the predict function to test the performance of the model in testing data and summarize the performance of the linear regression model. How can you measure the quality of your predictions?
+
+```{r}
+# We can predict the testing values
+
+predictions <- predict(model1_lm,test_data)
+
+lr_results<-data.frame(  RMSE = RMSE(predictions, test_data$price),
+                            Rsquare = R2(predictions, test_data$price))
+
+                            
+lr_results                         
+
+#We can predict prices for out of sample data the same way
+predictions_oos <- predict(model1_lm,london_house_prices_2019_out_of_sample)
+```
+
+# Fit a tree model
+
+Next I fit a tree model using the same subset of features. Again you can (and should) add more variables and tune the parameter of your tree to find a better fit. 
+
+Compare the performance of the linear regression model with the tree model; which one performs better? Why do you think that is the case?
+
+```{r tree model}
+
+model2_tree <- train(
+ price ~  total_floor_area + distance_to_station + latitude 
+  + longitude + energy_consumption_potential + property_type + london_zone 
+  + num_tube_lines + average_income,
+  train_data,
+  method = "rpart",
+  trControl = control,
+  tuneLength=10
+    )
+
+#You can view how the tree performs
+model2_tree$results
+
+#You can view the final tree
+rpart.plot(model2_tree$finalModel)
+
+#you can also visualize the variable importance
+importance <- varImp(model2_tree, scale=TRUE)
+plot(importance)
+
+```
+
+```{r}
+predictions <- predict(model2_tree,test_data)
+
+lr_results<-data.frame(  RMSE = RMSE(predictions, test_data$price), 
+                            Rsquare = R2(predictions, test_data$price))
+
+                            
+lr_results                         
+
+#We can predict prices for out of sample data the same way
+predictions_oos <- predict(model1_lm,london_house_prices_2019_out_of_sample)
+
+```
+
+
+
+# Other algorithms
+
+Use at least two other algorithms to predict prices. Don't forget to tune the parameters of these algorithms. And then compare the performances of your algorithms to linear regression and trees.
+
+```{r}
+# method 3 - LASSO
+
+lambda_seq <- seq(0, 0.01, length = 1000)
+
+# lasso regression using k-fold cross validation to select the best lambda
+
+model3_lasso <- train(
+ price ~ total_floor_area + distance_to_station + latitude 
+  + longitude + energy_consumption_potential + property_type + london_zone 
+  + num_tube_lines + average_income,
+ data = train_data,
+ method = "glmnet",
+  preProc = c("center", "scale"), #This option standardizes the data before running the LASSO regression
+  trControl = control,
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_seq) #alpha=1 specifies to run a LASSO regression.
+  )
+
+# Model coefficients
+coef(model3_lasso$finalModel, model3_lasso$bestTune$lambda)
+
+# Best lambda
+model3_lasso$bestTune$lambda
+
+# Count of how many coefficients are greater than zero and how many are equal to zero
+
+sum(coef(model3_lasso$finalModel, model3_lasso$bestTune$lambda)!=0)
+sum(coef(model3_lasso$finalModel, model3_lasso$bestTune$lambda)==0)
+
+# Make predictions
+predictions <- predict(model3_lasso,test_data)
+
+# Model prediction performance
+
+data.frame(
+  RMSE = RMSE(predictions, test_data$price),
+  Rsquare = R2(predictions, test_data$price)
+)
+
+
+```
+
+
+
+
+
+
+```{r}
+# method 4 - KNN
+model4_knn <- train(
+  price ~  log(total_floor_area) + distance_to_station + latitude 
+  + longitude + energy_consumption_potential + property_type + london_zone 
+  + num_tube_lines + average_income,
+  data = train_data,
+     method = "knn",
+     trControl = trainControl("cv", number = 10), #use 10 fold cross validation
+     tuneLength = 10, #number of parameter values train function will try
+     preProcess = c("center", "scale"))  #center and scale the data in k-nn this is pretty important
+
+model4_knn
+plot(model4_knn) #we can plot the results
+
+
+```
+
+We observe that the optimal number of neighbors would be around 10, since that's where the lowest RMSE is. 
+
+
+```{r}
+# Evaluating the KNN model
+predictions <- predict(model4_knn,test_data)
+
+knn_results<-data.frame(  RMSE = RMSE(predictions, test_data$price), 
+                            Rsquare = R2(predictions, test_data$price))
+
+                            
+knn_results                         
+
+#We can predict prices for out of sample data the same way
+predictions_oos <- predict(model1_lm,london_house_prices_2019_out_of_sample)
+
+```
+
+
+
+# Stacking
+
+Use stacking to ensemble your algorithms.
+
+```{r,warning=FALSE,  message=FALSE }
+
+control <- trainControl (
+    method="cv",
+    number=5,
+    verboseIter=FALSE,
+    index=createResample(train_data$price, 25))
+
+
+model5_stack <- caretList(
+    price ~ log(total_floor_area) + distance_to_station + water_company + latitude +
+      longitude + co2_emissions_current + property_type + london_zone + num_tube_lines +
+      average_income,
+    data = train_data,
+    trControl=control, #Control options
+    metric = "R2", # Metric to test fit
+    methodList=c("lm",'rpart','ranger','glmnet','knn') # Models in stacking: glm=logistic regression
+  )
+
+
+  # tuneList=list(
+  #     ranger=caretModelSpec(method="ranger", tuneGrid=data.frame(mtry=2,splitrule="variance",min.node.size=5)), #Random forest with given parameters
+  #     rpart=caretModelSpec(method="rpart",  tuneGrid=data.frame(cp=0.0011),minbucket=2), #Tree with given parameters,
+  #     lasso = caretModelSpec(method = 'glmnet'), 
+  #     knn = caretModelSpec(method = 'knn')
+  #   )
+
+```
+
+```{r}
+# Fortunately caret package has various functions to display relative performance of multiple methods
+
+# To use them we need to put all results together in a list first
+print(names(model5_stack))
+  resamples <- resamples(model5_stack)
+   typeof(resamples)
+  summary(resamples)
+  
+  names(resamples)
+
+  # We can use dotplots
+  #dotplot(resamples, metric = "R2")
+# We can use box plots  
+  #bwplot(resamples,metric="R2")	
+#or correlations    
+   modelCor(resamples)
+#We can visualize results in scatter plots as well
+  xyplot(resamples)
+  splom(resamples)
+  
+```
+
+```{r}
+control <- trainControl (
+    method="cv",
+    number=5,
+    verboseIter=TRUE,
+    savePredictions = "final",
+    index=createResample(train_data$price, 25))
+
+
+model6_opt_stack <- caretList(
+    price ~ log(total_floor_area) + district + distance_to_station +
+    energy_consumption_potential + property_type + london_zone +
+    average_income + windows_energy_eff + tenure  + latitude + longitude,
+    data = train_data,
+    metric = "RMSE", # Metric to test fit
+    methodList=c("glmnet",'rpart','knn'),
+    trControl=control
+  )
+```
+
+```{r}
+# To use them we need to put all results together in a list first
+  resamples <- resamples(model6_opt_stack)
+  summary(resamples)
+  
+  names(resamples)
+
+  # We can use dotplots
+  #dotplot(resamples, metric = "R2")
+# We can use box plots  
+  #bwplot(resamples,metric="R2")	
+#or correlations    
+   modelCor(resamples)
+#We can visualize results in scatter plots as well
+  xyplot(resamples)
+  splom(resamples)
+```
+```{r}
+#Now we can put all the results together and stack them
+greedy_ensemble <- caretStack(
+  model6_opt_stack,
+  method="glmnet",
+  metric="RMSE",
+  trControl=trainControl(
+    method="boot",
+    number=10,
+    savePredictions="final"
+    #classProbs=TRUE,
+    #summaryFunction=twoClassSummary
+  )
+)
+  
+  
+  # caretEnsemble(
+  # model6_opt_stack, 
+  # metric="RMSE",
+  # trControl=trainControl(
+  #   number=2,
+  #   savePredictions = "final",
+  #  # summaryFunction=twoClassSummary,
+  #   classProbs=FALSE
+  #   ))
+
+summary(greedy_ensemble)
+
+predictions <- predict(greedy_ensemble,test_data, interval = 'prediction')
+
+ensemble_results <-data.frame(  RMSE = RMSE(predictions, test_data$price), 
+                            Rsquare = R2(predictions, test_data$price))
+
+                            
+ensemble_results       
+```
+
+```{r}
+resamples(list(
+  LM=model1_lm,
+  TREE=model2_tree,
+  LASSO = model3_lasso,
+  KNN=model4_knn)) %>%
+  bwplot(scales=list(x=list(relation='free'), y=list(relation='free')))
+```
+
+
+With stacking, the best models to combine are not closely correlated.
+Therefore, we shuold pick either the lasso or the linear since they are almost perfectly
+correlated, and think carefully whether we want one of those models, the 
+random tree or the knn model. All of those models have a correlation above 0.8,
+which is a lot. 
+
+# Pick investments
+
+In this section you should use the best algorithm you identified to choose 200 properties from the out of sample data.
+
+Our best algorithm is the KNN - it has the highest R2 and the lowest RMSE, even when compared against our stacked model.
+
+```{r,warning=FALSE,  message=FALSE }
+
+
+numchoose = 200
+
+oos <- london_house_prices_2019_out_of_sample
+
+#predict the value of houses
+oos$predicted_price <- predict(model4_knn,oos)
+
+# we are choosing our houses based on the rate of return compared to the asking price
+oos <- oos %>%
+  mutate(predicted_price = exp(predicted_price),
+    profit = predicted_price - asking_price,
+         profit_perc = profit / asking_price) %>%
+  top_n(numchoose, profit_perc)
+
+# now we calculate our total profit
+total_profit <- sum(oos$profit)
+investment <- sum(oos$asking_price)
+return <- total_profit / investment
+return_per_house <- total_profit/numchoose
+
+# biggest and smallest predicte d price
+print(min(oos$predicted_price))
+print(max(oos$predicted_price))
+print(median(oos$predicted_price))
+print(mean(oos$predicted_price))
+# with the current choices, we would expect a 64% rate of return on our investment
+# the investment required would be 76399000, with an expected
+# return of 48943670.
+
+#output your choices. Change the name of the file to your "lastname_firstname.csv"
+write.csv(oos,"Vivian_vanOosten.csv")
+
+```
+
+
